@@ -45,74 +45,69 @@ namespace Calamari.Kubernetes
             this.workingDirectory = workingDirectory;
         }
 
-        public CommandResult Execute(string accountType)
+        public CommandResult Execute()
         {
-            var errorResult = new CommandResult(string.Empty, 1);
-
             foreach (var proxyVariable in ProxyEnvironmentVariablesGenerator.GenerateProxyEnvironmentVariables())
             {
                 environmentVars[proxyVariable.Key] = proxyVariable.Value;
             }
 
-            var kubeConfig = CreateKubectlConfig();
-            if (!kubectl.TrySetKubectl())
+            try
             {
-                return errorResult;
-            }
+                kubectl.SetKubectl();
+                var @namespace = DetermineNamespace();
+                SetupContext(@namespace);
+                CreateNamespace(@namespace);
 
-            var @namespace = variables.Get(SpecialVariables.Namespace);
-            if (string.IsNullOrEmpty(@namespace))
-            {
-                log.Verbose("No namespace provided. Using default");
-                @namespace = "default";
+                var outputKubeConfig = variables.GetFlag(SpecialVariables.OutputKubeConfig);
+                if (outputKubeConfig)
+                {
+                    kubectl.ExecuteCommandAndAssertSuccess("config", "view");
+                }
             }
-
-            if (!TrySetupContext(kubeConfig, @namespace, accountType))
+            catch (KubectlException e)
             {
-                return errorResult;
-            }
-
-            if (!CreateNamespace(@namespace))
-            {
-                log.Verbose("Could not create namespace. Continuing on, as it may not be working directly with the target.");
-            }
-
-            var outputKubeConfig = variables.GetFlag(SpecialVariables.OutputKubeConfig);
-            if (outputKubeConfig)
-            {
-                kubectl.ExecuteCommandAndAssertSuccess("config", "view");
+                log.Error(e.Message);
+                return new CommandResult(string.Empty, 1);
             }
 
             return new CommandResult(string.Empty, 0);
         }
 
-        bool TrySetupContext(string kubeConfig, string @namespace, string accountType)
+        string DetermineNamespace()
         {
+            var @namespace = variables.Get(SpecialVariables.Namespace);
+            if (!string.IsNullOrEmpty(@namespace))
+                return @namespace;
+            
+            log.Verbose("No namespace provided. Using default");
+            return "default";
+        }
+
+        void SetupContext(string @namespace)
+        {
+            var kubeConfig = CreateKubectlConfig();
+            var accountType = variables.Get(Deployment.SpecialVariables.Account.AccountType);
             if (accountType == AccountTypes.AzureServicePrincipal || accountType == AccountTypes.AzureOidc)
             {
                 var azureCli = new AzureCli(log, commandLineRunner, workingDirectory, environmentVars);
                 var kubeloginCli = new KubeLogin(log, commandLineRunner, workingDirectory, environmentVars);
                 var azureAuth = new AzureKubernetesServicesAuth(azureCli, kubectl, kubeloginCli, variables);
-
-                if (!azureAuth.TryConfigure(@namespace, kubeConfig))
-                    return false;
+                azureAuth.Configure(@namespace, kubeConfig);
             }
             else if (accountType == AccountTypes.GoogleCloudAccount || variables.GetFlag(Deployment.SpecialVariables.Action.GoogleCloud.UseVmServiceAccount))
             {
                 var gcloudCli = new GCloud(log, commandLineRunner, fileSystem, workingDirectory, environmentVars);
                 var gkeGcloudAuthPlugin = new GkeGcloudAuthPlugin(log, commandLineRunner, workingDirectory, environmentVars);
                 var gcloudAuth = new GoogleKubernetesEngineAuth(gcloudCli, gkeGcloudAuthPlugin, kubectl, variables, log);
-
-                if (!gcloudAuth.TryConfigure(@namespace))
-                    return false;
+                gcloudAuth.Configure(@namespace);
             }
-            else
+            else // All other auth mechanisms require some manual commands to configure
             {
                 var clusterUrl = variables.Get(SpecialVariables.ClusterUrl);
                 if (string.IsNullOrEmpty(clusterUrl))
                 {
-                    log.Error("Kubernetes cluster URL is missing");
-                    return false;
+                    throw new KubectlException("Kubernetes cluster URL is missing");
                 }
                 const string user = "octouser";
                 const string cluster = "octocluster";
@@ -129,8 +124,7 @@ namespace Calamari.Kubernetes
                     var serverCertPath = variables.Get(SpecialVariables.CertificateAuthorityPath);
                     if (!fileSystem.FileExists(serverCertPath))
                     {
-                        log.Error("Certificate authority file not found");
-                        return false;
+                        throw new KubectlException("Certificate authority file not found");
                     }
                     kubectl.ExecuteCommandAndAssertSuccess("config", "set-cluster", cluster, $"--certificate-authority={serverCertPath}");
                 }
@@ -140,8 +134,7 @@ namespace Calamari.Kubernetes
                     var serverCertPem = variables.Get(SpecialVariables.CertificatePem(certificateAuthority));
                     if (string.IsNullOrEmpty(serverCertPem))
                     {
-                        log.Error("Kubernetes server certificate does not include the certificate data");
-                        return false;
+                        throw new KubectlException("Kubernetes server certificate does not include the certificate data");
                     }
 
                     var authorityData = Convert.ToBase64String(Encoding.ASCII.GetBytes(serverCertPem));
@@ -162,15 +155,13 @@ namespace Calamari.Kubernetes
                     var podServiceAccountTokenPath = variables.Get(SpecialVariables.PodServiceAccountTokenPath);
                     if (!fileSystem.FileExists(podServiceAccountTokenPath))
                     {
-                        log.Error("Pod service token file not found");
-                        return false;
+                        throw new KubectlException("Pod service token file not found");
                     }
 
                     var podServiceAccountToken = fileSystem.ReadFile(podServiceAccountTokenPath);
                     if (string.IsNullOrEmpty(podServiceAccountToken))
                     {
-                        log.Error("Pod service token file is empty");
-                        return false;
+                        throw new KubectlException("Pod service token file is empty");
                     }
 
                     log.Info($"Creating kubectl context to {clusterUrl} (namespace {@namespace}) using a Pod Service Account Token");
@@ -182,8 +173,7 @@ namespace Calamari.Kubernetes
                     var token = variables.Get(Deployment.SpecialVariables.Account.Token);
                     if (string.IsNullOrEmpty(token))
                     {
-                        log.Error("Kubernetes authentication Token is missing");
-                        return false;
+                        throw new KubectlException("Kubernetes authentication Token is missing");
                     }
 
                     SetupContextForToken(@namespace, token, clusterUrl, user);
@@ -204,14 +194,12 @@ namespace Calamari.Kubernetes
 
                     if (string.IsNullOrEmpty(clientCertPem))
                     {
-                        log.Error("Kubernetes client certificate does not include the certificate data");
-                        return false;
+                        throw new KubectlException("Kubernetes client certificate does not include the certificate data");
                     }
 
                     if (string.IsNullOrEmpty(clientCertKey))
                     {
-                        log.Error("Kubernetes client certificate does not include the private key data");
-                        return false;
+                        throw new KubectlException("Kubernetes client certificate does not include the private key data");
                     }
 
                     log.Verbose("Encoding client cert key");
@@ -228,17 +216,13 @@ namespace Calamari.Kubernetes
                 }
                 else if (string.IsNullOrEmpty(accountType))
                 {
-                    log.Error($"Kubernetes account type or certificate is missing");
-                    return false;
+                    throw new KubectlException($"Kubernetes account type or certificate is missing");
                 }
                 else
                 {
-                    log.Error($"Account Type {accountType} is currently not valid for kubectl contexts");
-                    return false;
+                    throw new KubectlException($"Account Type {accountType} is currently not valid for kubectl contexts");
                 }
             }
-
-            return true;
         }
 
         void SetupContextForToken(string @namespace, string token, string clusterUrl, string user)
@@ -361,12 +345,15 @@ namespace Calamari.Kubernetes
             return true;
         }
 
-        bool CreateNamespace(string @namespace)
+        void CreateNamespace(string @namespace)
         {
             if (TryExecuteCommandWithVerboseLoggingOnly("get", "namespace", @namespace))
-                return true;
+                return;
 
-            return TryExecuteCommandWithVerboseLoggingOnly("create", "namespace", @namespace);
+            if (!TryExecuteCommandWithVerboseLoggingOnly("create", "namespace", @namespace))
+            {
+                log.Verbose("Could not create namespace. Continuing on, as it may not be working directly with the target.");
+            }
         }
 
         string CreateKubectlConfig()
