@@ -18,15 +18,23 @@ namespace Calamari.Kubernetes.Integration
         private bool isSet;
 
         public Kubectl(IVariables variables, ILog log, ICommandLineRunner commandLineRunner)
-            : this(variables, log, commandLineRunner, Environment.CurrentDirectory, new Dictionary<string, string>())
+            : this(variables,
+                   log,
+                   commandLineRunner,
+                   Environment.CurrentDirectory,
+                   new Dictionary<string, string>())
         {
         }
 
-        public Kubectl(IVariables variables, ILog log, ICommandLineRunner commandLineRunner, string workingDirectory,
-            Dictionary<string, string> environmentVariables) : base(log, commandLineRunner, workingDirectory, environmentVariables)
+        public Kubectl(IVariables variables,
+                       ILog log,
+                       ICommandLineRunner commandLineRunner,
+                       string workingDirectory,
+                       Dictionary<string, string> environmentVariables) : base(log, commandLineRunner, workingDirectory, environmentVariables)
         {
             customKubectlExecutable = variables.Get("Octopus.Action.Kubernetes.CustomKubectlExecutable");
         }
+
         public void SetWorkingDirectory(string directory)
         {
             workingDirectory = directory;
@@ -63,8 +71,10 @@ namespace Calamari.Kubernetes.Integration
             {
                 throw new KubectlException($"The custom kubectl location of {customKubectlExecutable} does not exist. See https://g.octopushq.com/KubernetesTarget for more information.");
             }
-
-            ExecutableLocation = customKubectlExecutable;
+            else
+            {
+                ExecutableLocation = customKubectlExecutable;
+            }
 
             if (!TryExecuteKubectlCommand("version", "--client", "--output=yaml"))
             {
